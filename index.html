@@ -108,13 +108,58 @@ var S={view:'overview',orders:[],tasks:[],notes:'',brand:'Panya',user:'Andrew',w
   calY:2026,calM:5,calSel:TODAY,calPicker:false,calPickerY:2026,
   wMenu:false,nid:100};
 
-function save(){try{localStorage.setItem('panya_dash_v4',JSON.stringify({orders:S.orders,tasks:S.tasks,notes:S.notes,brand:S.brand,user:S.user,wCity:S.wCity}));}catch(e){}}
+function save_local(){try{localStorage.setItem('panya_dash_v4',JSON.stringify(syncData()));}catch(e){}}
+function save(){save_local();cloudPushDebounced();}
 function load(){
   try{var s=localStorage.getItem('panya_dash_v4');if(s){var d=JSON.parse(s);
     S.orders=d.orders||INIT_ORDERS.slice();S.tasks=d.tasks||INIT_TASKS.slice();
     S.notes=d.notes||'';S.brand=d.brand||'Panya';S.user=d.user||'Andrew';S.wCity=d.wCity||'hcm';
   }else{S.orders=INIT_ORDERS.slice();S.tasks=INIT_TASKS.slice();}}
   catch(e){S.orders=INIT_ORDERS.slice();S.tasks=INIT_TASKS.slice();}
+}
+
+/* =================== CLOUD SYNC (JSONBin.io) =================== */
+var SYNC={key:'',bin:'',on:false,status:'off',timer:null};
+var SYNC_OPEN=false;
+var JB='https://api.jsonbin.io/v3/b';
+function loadSync(){try{var s=localStorage.getItem('panya_sync_cfg');if(s){var d=JSON.parse(s);SYNC.key=d.key||'';SYNC.bin=d.bin||'';SYNC.on=!!(SYNC.key&&SYNC.bin);if(SYNC.on)SYNC.status='idle';}}catch(e){}}
+function saveSyncCfg(){try{localStorage.setItem('panya_sync_cfg',JSON.stringify({key:SYNC.key,bin:SYNC.bin}));}catch(e){}}
+function syncData(){return {orders:S.orders,tasks:S.tasks,notes:S.notes,brand:S.brand,user:S.user,wCity:S.wCity};}
+function applyData(d){if(!d)return;S.orders=d.orders||S.orders;S.tasks=d.tasks||S.tasks;S.notes=d.notes||'';S.brand=d.brand||'Panya';S.user=d.user||'Andrew';S.wCity=d.wCity||'hcm';}
+function syncInfo(){
+  if(!SYNC.on)return{c:'#a1a1aa',t:'Chưa bật đồng bộ'};
+  if(SYNC.status==='syncing')return{c:'#b45309',t:'Đang đồng bộ…'};
+  if(SYNC.status==='error')return{c:'#dc2626',t:'Lỗi — bấm để sửa'};
+  if(SYNC.status==='ok')return{c:'#047857',t:'Đã đồng bộ ✓'};
+  return{c:'#2563eb',t:'Đồng bộ đám mây'};
+}
+function updateSyncBadge(){var i=syncInfo();var d=el('sync-dot'),l=el('sync-label');if(d)d.style.background=i.c;if(l){l.textContent=i.t;l.style.color=SYNC.on?i.c:'#71717a';}}
+function setSyncStatus(st){SYNC.status=st;updateSyncBadge();}
+function cloudPull(cb){
+  if(!SYNC.on){if(cb)cb(false);return;}
+  setSyncStatus('syncing');
+  fetch(JB+'/'+encodeURIComponent(SYNC.bin)+'/latest',{headers:{'X-Master-Key':SYNC.key,'X-Bin-Meta':'false'}})
+   .then(function(r){if(!r.ok)throw 0;return r.json();})
+   .then(function(rec){
+      if(rec&&(rec.orders||rec.tasks||rec.notes!==undefined)){applyData(rec);save_local();}
+      else{cloudPush();}
+      setSyncStatus('ok');if(cb)cb(true);})
+   .catch(function(){setSyncStatus('error');if(cb)cb(false);});
+}
+function cloudPush(){
+  if(!SYNC.on)return;
+  setSyncStatus('syncing');
+  fetch(JB+'/'+encodeURIComponent(SYNC.bin),{method:'PUT',headers:{'X-Master-Key':SYNC.key,'Content-Type':'application/json','X-Bin-Versioning':'false'},body:JSON.stringify(syncData())})
+   .then(function(r){if(!r.ok)throw 0;return r.json();})
+   .then(function(){setSyncStatus('ok');})
+   .catch(function(){setSyncStatus('error');});
+}
+function cloudPushDebounced(){if(!SYNC.on)return;if(SYNC.timer)clearTimeout(SYNC.timer);SYNC.timer=setTimeout(cloudPush,900);}
+function cloudCreateBin(cb){
+  fetch(JB,{method:'POST',headers:{'X-Master-Key':SYNC.key,'Content-Type':'application/json','X-Bin-Name':'panya-dashboard','X-Bin-Versioning':'false'},body:JSON.stringify(syncData())})
+   .then(function(r){if(!r.ok)throw 0;return r.json();})
+   .then(function(j){if(cb)cb(true,j&&j.metadata&&j.metadata.id);})
+   .catch(function(){if(cb)cb(false);});
 }
 
 /* =================== ICONS =================== */
@@ -180,7 +225,8 @@ function renderSidebar(){
     '<div style="font-size:11px;font-weight:700;letter-spacing:.05em;color:#a1a1aa;padding:6px 10px;text-transform:uppercase">Menu</div>'+
     '<nav style="display:flex;flex-direction:column;gap:3px;margin-top:4px">'+navHtml+'</nav>'+
     '<div class="alertbox"><div style="display:flex;align-items:center;gap:8px">'+ic(I.bell,15,'#dc2626',2.2)+'<span style="font-size:12.5px;font-weight:800;color:#18181b">Cần chú ý</span><span style="margin-left:auto;font-size:11px;font-weight:800;min-width:20px;height:20px;border-radius:10px;display:flex;align-items:center;justify-content:center;padding:0 6px;color:'+(total>0?'#dc2626':'#047857')+';background:'+(total>0?'#fdecec':'#e3f6ec')+'">'+total+'</span></div>'+alertHtml+'</div>'+
-    '<div style="margin-top:auto;border-top:1px solid #ececec;padding-top:14px;display:flex;align-items:center;gap:11px">'+
+    '<button id="sync-btn" class="navitem" style="margin-top:auto;border:1px solid #ececec;background:#fcfcfb;justify-content:flex-start;gap:10px;margin-bottom:2px"><span id="sync-dot" style="width:9px;height:9px;border-radius:50%;flex-shrink:0;background:'+syncInfo().c+'"></span><span id="sync-label" style="flex:1;font-size:12.5px;font-weight:700;color:'+(SYNC.on?syncInfo().c:'#71717a')+'">'+syncInfo().t+'</span>'+ic(I.chevR,14,'#a1a1aa')+'</button>'+
+    '<div style="margin-top:12px;border-top:1px solid #ececec;padding-top:14px;display:flex;align-items:center;gap:11px">'+
       '<div style="width:36px;height:36px;border-radius:50%;background:'+AC+';color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">'+esc((S.user||'A').slice(0,2).toUpperCase())+'</div>'+
       '<div style="min-width:0"><div style="display:flex;align-items:center;gap:5px"><span style="font-size:13.5px;font-weight:700;color:#18181b;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(S.user)+'</span><button class="editbtn" data-edit="user">'+ic(I.edit,13)+'</button></div><div style="font-size:12px;color:#71717a">Thu Mua</div></div>'+
     '</div></aside>';
@@ -466,6 +512,27 @@ function renderOverlays(){
       '<input id="dl-date" type="date" style="width:100%;height:46px;border:1px solid #ececec;border-radius:11px;padding:0 14px;font-size:14px;outline:none;margin-top:16px;color:#18181b">'+
       '<div style="display:flex;gap:10px;margin-top:18px"><button id="dl-skip" style="flex:1;height:44px;background:#f4f4f5;color:#52525b;border:none;border-radius:11px;font-size:14px;font-weight:700">Bỏ qua</button><button id="dl-save" style="flex:1;height:44px;background:'+AC+';color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700">Lưu deadline</button></div></div></div>';
   }
+  // Sync settings
+  if(SYNC_OPEN){
+    var si=syncInfo();
+    html+='<div style="position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center"><div id="sync-bg" style="position:absolute;inset:0;background:rgba(24,24,27,.4)"></div>'+
+      '<div style="position:relative;width:440px;max-width:94vw;max-height:90vh;overflow-y:auto;background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.26);padding:24px">'+
+      '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px"><div><div style="font-size:18px;font-weight:800">☁️ Đồng bộ đám mây</div><div style="font-size:12.5px;color:#71717a;font-weight:600;margin-top:4px;line-height:1.5">Lưu dữ liệu online để mọi máy &amp; trình duyệt đều thấy chung.</div></div><span id="sync-close" style="cursor:pointer;color:#a1a1aa;flex-shrink:0">'+ic(I.close,20)+'</span></div>'+
+      '<div style="margin-top:14px;display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700"><span style="width:9px;height:9px;border-radius:50%;background:'+si.c+'"></span><span style="color:'+si.c+'">'+si.t+'</span></div>'+
+      '<ol style="margin:14px 0 0;padding-left:20px;font-size:12.5px;color:#52525b;font-weight:600;line-height:1.75">'+
+        '<li>Đăng ký miễn phí tại <b>jsonbin.io</b></li>'+
+        '<li>Mở mục <b>API Keys</b> → copy <b>Master Key</b>, dán vào ô dưới</li>'+
+        '<li>Máy đầu tiên: bấm <b>+ Tạo kho mới</b> để tạo Bin ID</li>'+
+        '<li>Máy/trình duyệt khác: dán <b>cùng</b> Master Key + Bin ID rồi bấm Lưu</li>'+
+      '</ol>'+
+      '<label style="display:block;margin-top:16px"><span class="drawer-field">Master Key</span><input id="sync-key" class="drawer-inp" placeholder="$2a$10$..." value="'+esc(SYNC.key)+'"></label>'+
+      '<label style="display:block;margin-top:12px"><span class="drawer-field">Bin ID</span><div style="display:flex;gap:8px;margin-top:6px"><input id="sync-bin" class="drawer-inp" style="margin-top:0;flex:1" placeholder="VD: 65a1...c3" value="'+esc(SYNC.bin)+'"><button id="sync-create" style="flex-shrink:0;height:40px;padding:0 14px;background:'+AS+';color:'+AC+';border:1px solid '+AC+';border-radius:10px;font-size:13px;font-weight:700;white-space:nowrap">+ Tạo kho mới</button></div></label>'+
+      '<div style="display:flex;gap:10px;margin-top:20px">'+
+        (SYNC.on?'<button id="sync-off" style="height:44px;padding:0 16px;background:#fdecec;color:#dc2626;border:none;border-radius:11px;font-size:13.5px;font-weight:700">Tắt</button>':'')+
+        '<button id="sync-pull" style="height:44px;padding:0 16px;background:#f4f4f5;color:#52525b;border:none;border-radius:11px;font-size:13.5px;font-weight:700">⤓ Tải về</button>'+
+        '<button id="sync-save" style="flex:1;height:44px;background:'+AC+';color:#fff;border:none;border-radius:11px;font-size:14px;font-weight:700">Lưu &amp; Đồng bộ</button>'+
+      '</div></div></div>';
+  }
   return html;
 }
 
@@ -568,6 +635,30 @@ function attachOverlays(){
   var dlbg=el('dl-bg');if(dlbg)dlbg.addEventListener('click',function(){S.dlPrompt=null;render();});
   var dls=el('dl-skip');if(dls)dls.addEventListener('click',function(){S.dlPrompt=null;render();});
   var dlsave=el('dl-save');if(dlsave)dlsave.addEventListener('click',function(){var v=el('dl-date').value;if(v)updTask(S.dlPrompt.id,{due:v});S.dlPrompt=null;render();});
+  // sync settings
+  var syb=el('sync-btn');if(syb)syb.addEventListener('click',function(){SYNC_OPEN=true;render();});
+  if(SYNC_OPEN){
+    function closeS(){SYNC_OPEN=false;render();}
+    var sclose=el('sync-close');if(sclose)sclose.addEventListener('click',closeS);
+    var sbg=el('sync-bg');if(sbg)sbg.addEventListener('click',closeS);
+    var screate=el('sync-create');if(screate)screate.addEventListener('click',function(){
+      var k=el('sync-key').value.trim();if(!k){alert('Hãy dán Master Key trước.');return;}
+      SYNC.key=k;this.textContent='Đang tạo…';this.disabled=true;
+      cloudCreateBin(function(ok,id){if(ok&&id){SYNC.bin=id;}else{alert('Không tạo được kho. Kiểm tra lại Master Key.');}render();});
+    });
+    var ssave=el('sync-save');if(ssave)ssave.addEventListener('click',function(){
+      SYNC.key=el('sync-key').value.trim();SYNC.bin=el('sync-bin').value.trim();SYNC.on=!!(SYNC.key&&SYNC.bin);
+      if(!SYNC.on){alert('Cần cả Master Key và Bin ID.');return;}
+      saveSyncCfg();SYNC_OPEN=false;render();
+      cloudPull(function(ok){render();if(!ok)alert('Đã lưu nhưng chưa kết nối được. Kiểm tra Master Key / Bin ID / mạng.');});
+    });
+    var soff=el('sync-off');if(soff)soff.addEventListener('click',function(){if(!confirm('Tắt đồng bộ? Dữ liệu vẫn còn trên máy này.'))return;SYNC.on=false;SYNC.status='off';try{localStorage.removeItem('panya_sync_cfg');}catch(e){}SYNC_OPEN=false;render();});
+    var spull=el('sync-pull');if(spull)spull.addEventListener('click',function(){
+      SYNC.key=el('sync-key').value.trim();SYNC.bin=el('sync-bin').value.trim();SYNC.on=!!(SYNC.key&&SYNC.bin);
+      if(!SYNC.on){alert('Cần Master Key và Bin ID.');return;}
+      saveSyncCfg();cloudPull(function(ok){render();if(!ok)alert('Không tải được. Kiểm tra lại thông tin.');});
+    });
+  }
 }
 
 // Re-render chỉ phần content (giữ focus cho input search)
@@ -585,8 +676,10 @@ document.addEventListener('click',function(e){
 });
 
 /* =================== INIT =================== */
+loadSync();
 load();
 render();
+if(SYNC.on)cloudPull(function(ok){if(ok)render();});
 </script>
 </body>
 </html>
