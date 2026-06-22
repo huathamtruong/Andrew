@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dashboard Thu Mua – Panya</title>
+<!-- v5: workspace chung + phan quyen + NCC + bao gia + bao cao -->
+<meta name="app-version" content="5.0-dynamic">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap');
 *{box-sizing:border-box;margin:0;padding:0}
@@ -113,7 +115,11 @@ var S={view:'overview',orders:[],tasks:[],notes:'',brand:'Panya',user:'Andrew',w
   oFilter:'all',oSearch:'',oPoF:'',oHdF:'',oNpF:'',oGF:'',oSel:[],oOpen:null,oMenu:null,oMenuRect:null,
   tFilter:'all',tDateF:'',tSel:[],tMenu:null,tMenuRect:null,tEditId:null,tEditDateId:null,dlPrompt:null,
   calY:2026,calM:5,calSel:TODAY,calPicker:false,calPickerY:2026,calImportant:[],
-  wMenu:false,nid:100};
+  wMenu:false,nid:100,
+  /* ====== MỚI: dữ liệu động bổ sung ====== */
+  ncc:[],nccOpen:null,nccSearch:'',
+  quotes:[],qOpen:null,qSearch:'',qView:'list',
+  members:{},role:'member',membersOpen:false};
 
 function save_local(){try{localStorage.setItem('panya_dash_v4',JSON.stringify(syncData()));}catch(e){}}
 function save(){save_local();cloudPushDebounced();}
@@ -121,6 +127,8 @@ function load(){
   try{var s=localStorage.getItem('panya_dash_v4');if(s){var d=JSON.parse(s);
     S.orders=d.orders||INIT_ORDERS.slice();S.tasks=d.tasks||INIT_TASKS.slice();
     S.notes=d.notes||'';S.brand=d.brand||'Panya';S.user=d.user||'Andrew';S.wCity=d.wCity||'hcm';
+    S.ncc=d.ncc||[];S.quotes=d.quotes||[];S.members=d.members||{};S.calImportant=d.calImportant||[];
+    if(d.nid)S.nid=Math.max(S.nid,d.nid);
   }else{S.orders=INIT_ORDERS.slice();S.tasks=INIT_TASKS.slice();}}
   catch(e){S.orders=INIT_ORDERS.slice();S.tasks=INIT_TASKS.slice();}
 }
@@ -139,13 +147,22 @@ var firebaseConfig={
 };
 /* ⬆️⬆️⬆️ HẾT PHẦN CẦN DÁN ⬆️⬆️⬆️ */
 
+/* ID của workspace dùng CHUNG cho cả team Thu Mua. Mọi người đăng nhập đều thấy
+   cùng 1 bộ dữ liệu (đơn hàng, công việc, NCC, báo giá). Đổi tên này nếu muốn
+   tách nhiều team riêng. */
+var WORKSPACE_ID='panya-thumua';
+
 var FB={ready:false,configured:false,auth:null,db:null,storage:null,user:null,status:'init',unsub:null,timer:null,lastJSON:'',firstSnap:true};
 var SYNC_OPEN=false;
 var LOGIN={email:'',err:''};
 
 function fbConfigured(){return firebaseConfig.apiKey&&firebaseConfig.apiKey.indexOf('DAN_')!==0;}
-function syncData(){return {orders:S.orders,tasks:S.tasks,notes:S.notes,brand:S.brand,user:S.user,wCity:S.wCity,calImportant:S.calImportant||[]};}
-function applyData(d){if(!d)return;S.orders=d.orders||S.orders;S.tasks=d.tasks||S.tasks;S.notes=d.notes||'';S.brand=d.brand||'Panya';S.user=d.user||'Andrew';S.wCity=d.wCity||'hcm';S.calImportant=d.calImportant||[];}
+function syncData(){return {orders:S.orders,tasks:S.tasks,notes:S.notes,brand:S.brand,wCity:S.wCity,calImportant:S.calImportant||[],ncc:S.ncc||[],quotes:S.quotes||[],members:S.members||{},nid:S.nid};}
+function applyData(d){if(!d)return;S.orders=d.orders||S.orders;S.tasks=d.tasks||S.tasks;S.notes=d.notes||'';S.brand=d.brand||'Panya';S.wCity=d.wCity||'hcm';S.calImportant=d.calImportant||[];S.ncc=d.ncc||[];S.quotes=d.quotes||[];S.members=d.members||{};if(d.nid)S.nid=Math.max(S.nid,d.nid);computeRole();}
+/* ===== Phân quyền ===== */
+function computeRole(){var u=FB.user;if(u&&S.members&&S.members[u.uid]){S.role=S.members[u.uid].role||'member';}else{S.role='member';}}
+function isAdmin(){return S.role==='admin';}
+function memberCount(){return Object.keys(S.members||{}).length;}
 
 function fbInit(){
   if(typeof firebase==='undefined'){FB.status='nolib';return;}
@@ -165,21 +182,52 @@ function fbInit(){
   }catch(e){FB.status='error';}
 }
 
-function docRef(){return FB.db.collection('dashboards').doc(FB.user.uid);}
+/* Doc dùng CHUNG cho cả team. (Trước đây mỗi người 1 doc theo uid → giờ chung 1 workspace) */
+function docRef(){return FB.db.collection('workspaces').doc(WORKSPACE_ID);}
+/* Doc cũ theo từng người — dùng để di trú dữ liệu lần đầu */
+function legacyRef(){return FB.db.collection('dashboards').doc(FB.user.uid);}
+
+function ensureMembership(){
+  var u=FB.user;if(!u)return false;
+  if(!S.members)S.members={};
+  if(!S.members[u.uid]){
+    var first=memberCount()===0;
+    S.members[u.uid]={email:u.email||'',name:S.user||(u.email||'').split('@')[0]||'Thành viên',role:first?'admin':'member',joinedAt:Date.now()};
+    computeRole();
+    return true;
+  }
+  if(S.user&&S.members[u.uid].name!==S.user){S.members[u.uid].name=S.user;computeRole();return true;}
+  computeRole();
+  return false;
+}
 
 function subscribeCloud(){
   if(FB.unsub)FB.unsub();
   FB.firstSnap=true;
   FB.unsub=docRef().onSnapshot(function(snap){
-    if(snap.metadata.hasPendingWrites)return;        // bỏ qua tiếng vọng của chính máy này
-    if(!snap.exists){cloudPush();return;}            // lần đầu: tạo dữ liệu trên cloud từ máy này
-    var d=snap.data();var inJSON=JSON.stringify(d);
-    if(inJSON===JSON.stringify(syncData())){FB.firstSnap=false;return;} // không có gì mới
-    applyData(d);save_local();FB.lastJSON=inJSON;FB.firstSnap=false;
-    // không vẽ lại khi đang gõ để khỏi mất con trỏ; lần render kế tiếp sẽ hiển thị
+    if(snap.metadata.hasPendingWrites)return;
+    if(!snap.exists){migrateLegacyThenCreate();return;}
+    var d=snap.data();
+    applyData(d);
+    var changed=ensureMembership();
+    save_local();FB.lastJSON=JSON.stringify(d);FB.firstSnap=false;
+    if(changed)cloudPush();
     var ae=document.activeElement,tag=ae?ae.tagName:'';
     if(tag!=='INPUT'&&tag!=='TEXTAREA'&&tag!=='SELECT')render(); else updateSyncBadge();
   },function(){FB.status='error';updateSyncBadge();});
+}
+
+function migrateLegacyThenCreate(){
+  ensureMembership();
+  legacyRef().get().then(function(ls){
+    if(ls&&ls.exists){var od=ls.data();
+      if(od.orders&&od.orders.length)S.orders=od.orders;
+      if(od.tasks&&od.tasks.length)S.tasks=od.tasks;
+      if(od.notes)S.notes=od.notes;
+      if(od.ncc)S.ncc=od.ncc;if(od.quotes)S.quotes=od.quotes;
+      if(od.calImportant)S.calImportant=od.calImportant;
+    }
+  }).catch(function(){}).then(function(){cloudPush();render();});
 }
 
 function cloudPush(){
@@ -219,7 +267,13 @@ var I={
   bell:'M18 8a6 6 0 1 0-12 0c0 7-3 9-3 9h18s-3-2-3-9 M13.7 21a2 2 0 0 1-3.4 0',
   clock:'M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20 M12 7v5l3 2',
   home:'M3 21h18 M6 21V8l6-4 6 4v13 M10 9h4 M10 13h4 M10 17h4',
-  plus:'M12 5v14M5 12h14'
+  plus:'M12 5v14M5 12h14',
+  truck:'M1 3h15v13H1z M16 8h4l3 3v5h-7V8 M5.5 18.5a2 2 0 1 0 0 .01 M18.5 18.5a2 2 0 1 0 0 .01',
+  tag:'M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z M7 7h.01',
+  chart:'M3 3v18h18 M7 16l4-5 3 3 5-7',
+  users:'M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2 M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8 M23 21v-2a4 4 0 0 0-3-3.87 M16 3.13a4 4 0 0 1 0 7.75',
+  phone:'M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.13.96.36 1.9.69 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.33 1.85.56 2.81.69A2 2 0 0 1 22 16.92z',
+  trash:'M3 6h18 M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2 M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6'
 };
 
 /* =================== HELPERS =================== */
@@ -230,7 +284,7 @@ function tasksByStatus(st){return S.tasks.filter(function(t){return tSt(t)===st;
 var _skipScroll=false;
 function render(){
   var scroll=0;if(!_skipScroll){var _cc=el('content');if(_cc)scroll=_cc.scrollTop;}_skipScroll=false;
-  var bgs={overview:'#fce4cf',orders:'#dde8f1',tasks:'#e2ecd9',calendar:'#ede5d4'};
+  var bgs={overview:'#fce4cf',orders:'#dde8f1',tasks:'#e2ecd9',calendar:'#ede5d4',ncc:'#e6e0f1',quotes:'#f1e4dd',reports:'#dde8e4'};
   var app=el('app');
   app.style.background=bgs[S.view]||'#f6f6f5';
   app.innerHTML='<div class="app" style="background:'+(bgs[S.view]||'#f6f6f5')+'">'+
@@ -243,7 +297,7 @@ function render(){
 
 /* =================== SIDEBAR =================== */
 function renderSidebar(){
-  var nav=[['overview','Tổng quan',I.grid],['orders','Đơn đặt hàng',I.box],['tasks','Công việc',I.check],['calendar','Lịch & Deadline',I.cal]];
+  var nav=[['overview','Tổng quan',I.grid],['orders','Đơn đặt hàng',I.box],['ncc','Nhà cung cấp',I.truck],['quotes','Báo giá',I.tag],['tasks','Công việc',I.check],['calendar','Lịch & Deadline',I.cal],['reports','Báo cáo',I.chart]];
   var badges={orders:S.orders.filter(function(o){return o.status==='cho_xn'||o.status==='da_xn';}).length,tasks:S.tasks.filter(function(t){return !t.done;}).length};
   var navHtml=nav.map(function(n){
     var active=S.view===n[0];
@@ -274,7 +328,9 @@ function renderSidebar(){
     '<button id="sync-btn" class="navitem" style="margin-top:auto;border:1px solid #ececec;background:#fcfcfb;justify-content:flex-start;gap:10px;margin-bottom:2px"><span id="sync-dot" style="width:9px;height:9px;border-radius:50%;flex-shrink:0;background:'+syncInfo().c+'"></span><span id="sync-label" style="flex:1;font-size:12.5px;font-weight:700;color:'+(FB.user?syncInfo().c:'#71717a')+'">'+syncInfo().t+'</span>'+ic(I.chevR,14,'#a1a1aa')+'</button>'+
     '<div style="margin-top:12px;border-top:1px solid #ececec;padding-top:14px;display:flex;align-items:center;gap:11px">'+
       '<div style="width:36px;height:36px;border-radius:50%;background:'+AC+';color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0">'+esc((S.user||'A').slice(0,2).toUpperCase())+'</div>'+
-      '<div style="min-width:0"><div style="display:flex;align-items:center;gap:5px"><span style="font-size:13.5px;font-weight:700;color:#18181b;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(S.user)+'</span><button class="editbtn" data-edit="user">'+ic(I.edit,13)+'</button></div><div style="font-size:12px;color:#71717a">Thu Mua</div></div>'+
+      '<div style="min-width:0"><div style="display:flex;align-items:center;gap:5px"><span style="font-size:13.5px;font-weight:700;color:#18181b;text-transform:uppercase;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(S.user)+'</span><button class="editbtn" data-edit="user">'+ic(I.edit,13)+'</button></div>'+
+      '<div style="font-size:12px;color:#71717a;display:flex;align-items:center;gap:6px">Thu Mua'+(FB.user?'<span style="font-size:10px;font-weight:800;padding:1px 6px;border-radius:10px;color:'+(isAdmin()?'#b45309':'#15803d')+';background:'+(isAdmin()?'#fdf0df':'#e3f6ec')+'">'+(isAdmin()?'ADMIN':'NHÂN VIÊN')+'</span>':'')+'</div></div>'+
+      (FB.user&&isAdmin()?'<button id="members-btn" class="editbtn" title="Quản lý thành viên" style="margin-left:auto;width:28px;height:28px">'+ic(I.users,16,'#71717a')+'</button>':'')+
     '</div></aside>';
 }
 
@@ -285,8 +341,11 @@ function renderHeader(){
   var meta={
     overview:{t:'Tổng quan',s:'Bảng điều hành Thu Mua · Panya Home',d:I.grid,bg:'#ffe6cf',fg:'#c2410c',pill:'Hôm nay'},
     orders:{t:'Đơn đặt hàng',s:'Theo dõi tiến độ đặt & giao hàng từ NCC',d:I.box,bg:'#dbeafe',fg:'#1d4ed8',pill:active+' đang theo dõi'},
+    ncc:{t:'Nhà cung cấp',s:'Danh bạ & thông tin liên hệ nhà cung cấp',d:I.truck,bg:'#ede9fe',fg:'#6d28d9',pill:(S.ncc||[]).length+' NCC'},
+    quotes:{t:'Báo giá & So sánh giá',s:'Lưu báo giá NCC và so sánh giá theo mặt hàng',d:I.tag,bg:'#fef3c7',fg:'#b45309',pill:(S.quotes||[]).length+' báo giá'},
     tasks:{t:'Công việc & Deadline',s:'Việc cần xử lý của bộ phận Thu Mua',d:I.check,bg:'#dcfce7',fg:'#15803d',pill:pending+' cần làm'},
-    calendar:{t:'Lịch & Deadline',s:'Deadline đơn hàng và công việc trong tháng',d:I.cal,bg:'#f4e7c9',fg:'#a16207',pill:'Tháng 6'}
+    calendar:{t:'Lịch & Deadline',s:'Deadline đơn hàng và công việc trong tháng',d:I.cal,bg:'#f4e7c9',fg:'#a16207',pill:'Tháng 6'},
+    reports:{t:'Báo cáo số liệu',s:'Biểu đồ tự cập nhật theo dữ liệu thực tế',d:I.chart,bg:'#d1fae5',fg:'#047857',pill:'Trực tiếp'}
   };
   var m=meta[S.view]||meta.overview;
   return '<header class="hd"><div style="display:flex;align-items:center;gap:15px;min-width:0">'+
@@ -299,8 +358,11 @@ function renderHeader(){
 function renderContent(){
   if(S.view==='overview')return renderOverview();
   if(S.view==='orders')return renderOrders();
+  if(S.view==='ncc')return renderNCC();
+  if(S.view==='quotes')return renderQuotes();
   if(S.view==='tasks')return renderTasks();
   if(S.view==='calendar')return renderCalendar();
+  if(S.view==='reports')return renderReports();
   return '';
 }
 
@@ -522,6 +584,122 @@ function renderCalendar(){
     '<div class="card" style="overflow:hidden"><div style="padding:16px 16px 6px"><div style="font-size:14px;font-weight:800">'+fmtFull(S.calSel)+'</div><div style="font-size:12px;color:#a1a1aa;font-weight:600;margin-top:3px">'+(selEvs.length?selEvs.length+' mục đến hạn':'Không có deadline')+'</div></div>'+evsHtml+'</div></div>';
 }
 
+/* =================== HELPERS MỚI =================== */
+function fmtMoney(n){n=Number(n)||0;return n.toLocaleString('vi-VN');}
+function updNcc(id,patch){for(var i=0;i<S.ncc.length;i++){if(S.ncc[i].id===id){for(var k in patch)S.ncc[i][k]=patch[k];}}save();}
+function updQuote(id,patch){for(var i=0;i<S.quotes.length;i++){if(S.quotes[i].id===id){for(var k in patch)S.quotes[i][k]=patch[k];}}save();}
+function nccName(id){var n=S.ncc.filter(function(x){return x.id===id;})[0];return n?n.name:'';}
+function hbars(rows){var max=Math.max.apply(null,rows.map(function(r){return r.val;}).concat([1]));
+  if(!rows.length)return '<div style="padding:20px;text-align:center;color:#b4b4b8;font-size:13px;font-weight:600">Chưa có dữ liệu</div>';
+  return rows.map(function(r){var w=Math.round(r.val/max*100);
+    return '<div style="margin-bottom:11px"><div style="display:flex;justify-content:space-between;font-size:12.5px;font-weight:700;margin-bottom:5px;gap:10px"><span style="color:#3f3f46;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(r.label)+'</span><span style="color:'+(r.color||AC)+';flex-shrink:0">'+r.disp+'</span></div><div style="height:10px;background:#f1f1f2;border-radius:6px;overflow:hidden"><div style="height:100%;width:'+w+'%;background:'+(r.color||AC)+';border-radius:6px"></div></div></div>';}).join('');
+}
+
+/* =================== NHÀ CUNG CẤP =================== */
+function nccFiltered(){var q=(S.nccSearch||'').toLowerCase();
+  return S.ncc.filter(function(n){if(!q)return true;return (n.name+' '+(n.contact||'')+' '+(n.category||'')+' '+(n.phone||'')).toLowerCase().indexOf(q)>=0;});
+}
+function renderNCC(){
+  var list=nccFiltered();
+  var cols='1.4fr 1.2fr 1fr 0.9fr 70px';
+  var header='<div style="display:grid;grid-template-columns:'+cols+';gap:12px;padding:11px 22px;border-bottom:1px solid #ececec;background:#fafafa;font-size:11px;font-weight:700;color:#a1a1aa;text-transform:uppercase;letter-spacing:.04em;border-radius:13px 13px 0 0"><div>Nhà cung cấp</div><div>Người liên hệ</div><div>Điện thoại</div><div>Nhóm hàng</div><div style="text-align:right">Báo giá</div></div>';
+  var rows=list.map(function(n){
+    var nq=S.quotes.filter(function(q){return q.nccId===n.id;}).length;
+    return '<div class="ncc-open" data-id="'+n.id+'" style="display:grid;grid-template-columns:'+cols+';gap:12px;padding:15px 22px;border-bottom:1px solid #f2f2f2;align-items:center;font-size:13px;cursor:pointer">'+
+      '<div style="display:flex;align-items:center;gap:11px;min-width:0"><div style="width:36px;height:36px;border-radius:10px;background:#ede9fe;color:#6d28d9;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-weight:800">'+esc((n.name||'?')[0].toUpperCase())+'</div><div style="min-width:0"><div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.name||'(chưa đặt tên)')+'</div>'+(n.address?'<div style="font-size:12px;color:#a1a1aa;font-weight:600;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.address)+'</div>':'')+'</div></div>'+
+      '<div style="color:#3f3f46;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(n.contact||'—')+'</div>'+
+      '<div style="color:#52525b;font-weight:600">'+esc(n.phone||'—')+'</div>'+
+      '<div>'+(n.category?'<span style="font-size:11px;font-weight:700;color:#6d28d9;background:#ede9fe;padding:3px 9px;border-radius:20px">'+esc(n.category)+'</span>':'<span style="color:#c4c4c8">—</span>')+'</div>'+
+      '<div style="text-align:right;font-weight:800;color:'+(nq?AC:'#c4c4c8')+'">'+nq+'</div>'+
+      '</div>';
+  }).join('');
+  if(list.length===0)rows='<div style="padding:48px;text-align:center;color:#a1a1aa;font-size:14px;font-weight:600">Chưa có nhà cung cấp nào. Bấm “NCC mới” để thêm.</div>';
+  return '<div><div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">'+
+    '<input id="ncc-search" class="inp" placeholder="Tìm NCC, người liên hệ, nhóm hàng…" value="'+esc(S.nccSearch)+'" style="width:280px;height:40px">'+
+    '<button class="btn-primary" id="ncc-new" style="margin-left:auto;height:40px">'+ic(I.plus,16,'#fff')+'NCC mới</button></div>'+
+    '<div class="card">'+header+rows+'</div></div>';
+}
+
+/* =================== BÁO GIÁ & SO SÁNH GIÁ =================== */
+function quotesFiltered(){var q=(S.qSearch||'').toLowerCase();
+  return S.quotes.filter(function(x){if(!q)return true;return (x.item+' '+nccName(x.nccId)+' '+(x.unit||'')).toLowerCase().indexOf(q)>=0;});
+}
+function renderQuotes(){
+  var toggle='<div style="display:flex;gap:6px;background:#f1f1f2;border-radius:10px;padding:3px">'+
+    ['list','Danh sách','compare','So sánh giá'].reduce(function(acc,_,i,arr){if(i%2)return acc;var key=arr[i],lb=arr[i+1];var a=S.qView===key;acc+='<button class="q-view" data-view="'+key+'" style="height:32px;padding:0 16px;border:none;border-radius:8px;font-size:13px;font-weight:700;background:'+(a?'#fff':'transparent')+';color:'+(a?AC:'#71717a')+';box-shadow:'+(a?'0 1px 3px rgba(0,0,0,.1)':'none')+'">'+lb+'</button>';return acc;},'')+'</div>';
+  var top='<div style="display:flex;gap:10px;margin-bottom:14px;align-items:center;flex-wrap:wrap">'+toggle+
+    '<input id="q-search" class="inp" placeholder="Tìm mặt hàng, NCC…" value="'+esc(S.qSearch)+'" style="width:240px;height:40px">'+
+    '<button class="btn-primary" id="q-new" style="margin-left:auto;height:40px">'+ic(I.plus,16,'#fff')+'Báo giá mới</button></div>';
+  var body=S.qView==='compare'?renderQuotesCompare():renderQuotesList();
+  return '<div>'+top+body+'</div>';
+}
+function renderQuotesList(){
+  var list=quotesFiltered();
+  var cols='1.5fr 1.2fr 1fr 0.8fr 0.9fr 0.9fr';
+  var header='<div style="display:grid;grid-template-columns:'+cols+';gap:12px;padding:11px 20px;border-bottom:1px solid #ececec;background:#fafafa;font-size:11px;font-weight:700;color:#a1a1aa;text-transform:uppercase;letter-spacing:.04em;border-radius:13px 13px 0 0"><div>Mặt hàng</div><div>Nhà cung cấp</div><div style="text-align:right">Đơn giá</div><div>ĐVT</div><div>Ngày BG</div><div>Hiệu lực</div></div>';
+  var rows=list.map(function(q){var ov=q.validUntil&&isOD(q.validUntil);
+    return '<div class="q-open" data-id="'+q.id+'" style="display:grid;grid-template-columns:'+cols+';gap:12px;padding:14px 20px;border-bottom:1px solid #f2f2f2;align-items:center;font-size:13px;cursor:pointer">'+
+      '<div style="font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.item||'—')+'</div>'+
+      '<div style="color:#3f3f46;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(nccName(q.nccId)||q.nccText||'—')+'</div>'+
+      '<div style="text-align:right;font-weight:800;color:'+AC+'">'+fmtMoney(q.price)+'</div>'+
+      '<div style="color:#71717a;font-weight:600">'+esc(q.unit||'—')+'</div>'+
+      '<div style="color:#52525b;font-weight:600">'+fmtDM(q.date)+'</div>'+
+      '<div style="font-weight:700;color:'+(ov?'#dc2626':'#52525b')+'">'+(q.validUntil?fmtDM(q.validUntil):'—')+'</div>'+
+      '</div>';
+  }).join('');
+  if(list.length===0)rows='<div style="padding:48px;text-align:center;color:#a1a1aa;font-size:14px;font-weight:600">Chưa có báo giá nào. Bấm “Báo giá mới”.</div>';
+  return '<div class="card">'+header+rows+'</div>';
+}
+function renderQuotesCompare(){
+  var groups={};
+  quotesFiltered().forEach(function(q){var key=(q.item||'(không tên)').trim().toLowerCase();if(!groups[key])groups[key]={name:q.item||'(không tên)',items:[]};groups[key].items.push(q);});
+  var keys=Object.keys(groups);
+  if(keys.length===0)return '<div class="card" style="padding:48px;text-align:center;color:#a1a1aa;font-size:14px;font-weight:600">Chưa có dữ liệu để so sánh.</div>';
+  var html=keys.map(function(k){var g=groups[k];
+    var sorted=g.items.slice().sort(function(a,b){return (Number(a.price)||0)-(Number(b.price)||0);});
+    var min=Number(sorted[0].price)||0;
+    var rows=sorted.map(function(q,idx){var best=idx===0&&g.items.length>1;var p=Number(q.price)||0;
+      var pct=min>0&&p>min?' (+'+Math.round((p-min)/min*100)+'%)':'';
+      return '<div class="q-open" data-id="'+q.id+'" style="display:flex;align-items:center;gap:12px;padding:11px 16px;border-top:1px solid #f5f5f4;cursor:pointer;background:'+(best?'#e3f6ec':'transparent')+'">'+
+        (best?'<span style="font-size:10px;font-weight:800;color:#047857;background:#c9efd8;padding:2px 7px;border-radius:10px;flex-shrink:0">RẺ NHẤT</span>':'<span style="width:7px;height:7px;border-radius:50%;background:#d4d4d8;flex-shrink:0;margin:0 12px"></span>')+
+        '<span style="flex:1;font-size:13.5px;font-weight:700;color:#27272a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0">'+esc(nccName(q.nccId)||q.nccText||'(NCC?)')+'</span>'+
+        '<span style="font-size:12px;color:#dc2626;font-weight:700;flex-shrink:0">'+pct+'</span>'+
+        '<span style="font-size:14px;font-weight:800;color:'+(best?'#047857':'#3f3f46')+';flex-shrink:0">'+fmtMoney(q.price)+'<span style="font-size:11px;color:#a1a1aa;font-weight:600">/'+esc(q.unit||'đv')+'</span></span></div>';
+    }).join('');
+    return '<div class="card" style="overflow:hidden;margin-bottom:14px"><div style="padding:14px 16px 12px;display:flex;align-items:center;justify-content:space-between"><div style="font-size:15px;font-weight:800">'+esc(g.name)+'</div><span style="font-size:12px;font-weight:700;color:#71717a">'+g.items.length+' NCC</span></div>'+rows+'</div>';
+  }).join('');
+  return '<div>'+html+'</div>';
+}
+
+/* =================== BÁO CÁO SỐ LIỆU =================== */
+function renderReports(){
+  var totalOrders=S.orders.length;
+  var doneTasks=S.tasks.filter(function(t){return t.done;}).length;
+  var taskPct=S.tasks.length?Math.round(doneTasks/S.tasks.length*100):0;
+  var totalQuoteVal=S.quotes.reduce(function(s,q){return s+(Number(q.price)||0);},0);
+  var kpis=[
+    {v:totalOrders,l:'Tổng đơn hàng',fg:'#1d4ed8',bg:'#e8f0fe',d:I.box},
+    {v:S.ncc.length,l:'Nhà cung cấp',fg:'#6d28d9',bg:'#ede9fe',d:I.truck},
+    {v:S.quotes.length,l:'Báo giá đã lưu',fg:'#b45309',bg:'#fdf0df',d:I.tag},
+    {v:taskPct+'%',l:'Hoàn thành công việc',fg:'#047857',bg:'#e3f6ec',d:I.check}
+  ];
+  var kpiHtml=kpis.map(function(k){return '<div class="kpi"><span class="kpi-ic" style="background:'+k.bg+';color:'+k.fg+'">'+ic(k.d,19,k.fg)+'</span><div style="min-width:0"><div style="font-size:25px;font-weight:800;letter-spacing:-.02em;line-height:1">'+k.v+'</div><div style="font-size:12.5px;color:#71717a;font-weight:600;margin-top:3px">'+k.l+'</div></div></div>';}).join('');
+  var byStatus=SL.map(function(k){return {label:POM[k].label,val:S.orders.filter(function(o){return o.status===k;}).length,disp:S.orders.filter(function(o){return o.status===k;}).length+' đơn',color:POM[k].dot};});
+  var monthMap={};S.orders.forEach(function(o){if(!o.ngayXuat)return;var p=o.ngayXuat.split('-');var key=p[0]+'-'+p[1];monthMap[key]=(monthMap[key]||0)+1;});
+  var monthRows=Object.keys(monthMap).sort().map(function(k){var p=k.split('-');return {label:'Th '+Number(p[1])+'/'+p[0],val:monthMap[k],disp:monthMap[k]+' đơn',color:'#2563eb'};});
+  var nccCount={};S.orders.forEach(function(o){if(!o.ncc)return;nccCount[o.ncc]=(nccCount[o.ncc]||0)+1;});
+  var topNcc=Object.keys(nccCount).map(function(k){return {label:k,val:nccCount[k],disp:nccCount[k]+' đơn',color:'#6d28d9'};}).sort(function(a,b){return b.val-a.val;}).slice(0,6);
+  function panel(title,inner){return '<div class="card" style="padding:18px 20px"><div style="font-size:15px;font-weight:800;margin-bottom:16px">'+title+'</div>'+inner+'</div>';}
+  return '<div>'+
+    '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:16px">'+kpiHtml+'</div>'+
+    '<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start">'+
+      panel('📦 Đơn hàng theo trạng thái',hbars(byStatus))+
+      panel('🏭 Top nhà cung cấp (theo số đơn)',hbars(topNcc))+
+      panel('📅 Đơn hàng theo tháng (ngày xuất)',hbars(monthRows))+
+      panel('💰 Tổng quan báo giá','<div style="display:flex;align-items:baseline;gap:8px"><span style="font-size:32px;font-weight:800;color:'+AC+'">'+fmtMoney(totalQuoteVal)+'</span><span style="font-size:13px;color:#71717a;font-weight:600">tổng giá trị các báo giá</span></div><div style="margin-top:14px">'+hbars(S.ncc.map(function(n){var c=S.quotes.filter(function(q){return q.nccId===n.id;}).length;return {label:n.name,val:c,disp:c+' BG',color:'#b45309'};}).filter(function(r){return r.val>0;}).sort(function(a,b){return b.val-a.val;}).slice(0,6))+'</div>')+
+    '</div></div>';
+}
+
 /* =================== OVERLAYS (drawer, prompt) =================== */
 function renderOverlays(){
   var html='';
@@ -617,6 +795,61 @@ function renderOverlays(){
       '<div style="margin-top:14px;display:flex;align-items:center;gap:8px;font-size:12.5px;font-weight:700"><span style="width:9px;height:9px;border-radius:50%;background:'+si.c+'"></span><span style="color:'+si.c+'">'+si.t+'</span></div>'+
       body+'</div></div>';
   }
+
+  // ===== Drawer NHÀ CUNG CẤP =====
+  var nObj=S.ncc.filter(function(n){return n.id===S.nccOpen;})[0];
+  if(nObj){
+    var NF=[['Tên nhà cung cấp','name','VD: Viwood Asia',2,'text'],['Người liên hệ','contact','Tên người phụ trách',0,'text'],['Điện thoại','phone','VD: 0901 234 567',0,'text'],['Email','email','ncc@email.com',0,'text'],['Nhóm hàng','category','VD: Gỗ / Nhựa / Sắt',0,'text'],['Địa chỉ','address','Địa chỉ NCC',2,'text']];
+    var nFields=NF.map(function(f){var span=f[3]?'grid-column:1 / span '+f[3]:'';return '<label style="display:block;'+span+'"><span class="drawer-field">'+f[0]+'</span><input type="text" class="ncc-field drawer-inp" data-field="'+f[1]+'" value="'+esc(nObj[f[1]]||'')+'" placeholder="'+esc(f[2])+'"></label>';}).join('');
+    var nQuotes=S.quotes.filter(function(q){return q.nccId===nObj.id;});
+    var nQHtml=nQuotes.length?'<div style="margin-top:8px;border:1px solid #ececec;border-radius:11px;overflow:hidden">'+nQuotes.map(function(q,i){return '<div style="display:flex;justify-content:space-between;padding:9px 13px;font-size:13px;'+(i>0?'border-top:1px solid #f2f2f2':'')+'"><span style="font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(q.item)+'</span><span style="font-weight:800;color:'+AC+';flex-shrink:0;margin-left:10px">'+fmtMoney(q.price)+'/'+esc(q.unit||'đv')+'</span></div>';}).join('')+'</div>':'<div style="font-size:12.5px;color:#a1a1aa;font-weight:600;margin-top:6px">Chưa có báo giá nào từ NCC này.</div>';
+    html+='<div style="position:fixed;inset:0;z-index:50;display:flex;justify-content:flex-end"><div id="ncc-bg" style="position:absolute;inset:0;background:rgba(24,24,27,.34)"></div>'+
+      '<div style="position:relative;width:440px;max-width:94vw;height:100%;background:#fff;box-shadow:-8px 0 32px rgba(0,0,0,.14);display:flex;flex-direction:column;overflow-y:auto">'+
+      '<div style="padding:20px 24px 16px;border-bottom:1px solid #ececec;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;position:sticky;top:0;background:#fff;z-index:1"><div style="min-width:0"><div style="font-size:11.5px;font-weight:800;color:#6d28d9;text-transform:uppercase;letter-spacing:.04em">Thông tin NCC</div><h2 style="margin:6px 0 0;font-size:18px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(nObj.name||'NCC mới')+'</h2></div><span id="ncc-close" style="cursor:pointer;color:#a1a1aa;flex-shrink:0">'+ic(I.close,20)+'</span></div>'+
+      '<div style="flex:1;padding:20px 24px 28px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">'+nFields+
+      '<label style="display:block;grid-column:1 / span 2"><span class="drawer-field">Ghi chú</span><textarea class="ncc-field" data-field="note" placeholder="Điều khoản, lưu ý, đánh giá NCC…" style="width:100%;min-height:70px;resize:vertical;margin-top:6px;border:1px solid #ececec;border-radius:10px;padding:10px 12px;font-size:13.5px;font-weight:500;line-height:1.5;outline:none;color:#27272a">'+esc(nObj.note||'')+'</textarea></label></div>'+
+      '<div style="margin-top:18px"><span class="drawer-field">Báo giá của NCC này</span>'+nQHtml+'</div>'+
+      (isAdmin()?'<div style="margin-top:18px;padding-top:14px;border-top:1px solid #ececec"><button id="ncc-del" style="height:36px;padding:0 16px;background:#fdecec;color:#dc2626;border:none;border-radius:9px;font-size:13px;font-weight:700">'+ic(I.trash,14,'#dc2626')+' Xóa NCC này</button></div>':'')+
+      '</div></div></div>';
+  }
+
+  // ===== Drawer BÁO GIÁ =====
+  var qObj=S.quotes.filter(function(q){return q.id===S.qOpen;})[0];
+  if(qObj){
+    var nccOpts='<option value="">— Chọn NCC —</option>'+S.ncc.map(function(n){return '<option value="'+n.id+'"'+(qObj.nccId===n.id?' selected':'')+'>'+esc(n.name)+'</option>';}).join('');
+    html+='<div style="position:fixed;inset:0;z-index:50;display:flex;justify-content:flex-end"><div id="q-bg" style="position:absolute;inset:0;background:rgba(24,24,27,.34)"></div>'+
+      '<div style="position:relative;width:440px;max-width:94vw;height:100%;background:#fff;box-shadow:-8px 0 32px rgba(0,0,0,.14);display:flex;flex-direction:column;overflow-y:auto">'+
+      '<div style="padding:20px 24px 16px;border-bottom:1px solid #ececec;display:flex;align-items:flex-start;justify-content:space-between;gap:16px;position:sticky;top:0;background:#fff;z-index:1"><div style="min-width:0"><div style="font-size:11.5px;font-weight:800;color:#b45309;text-transform:uppercase;letter-spacing:.04em">Chi tiết báo giá</div><h2 style="margin:6px 0 0;font-size:18px;font-weight:800;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(qObj.item||'Báo giá mới')+'</h2></div><span id="q-close" style="cursor:pointer;color:#a1a1aa;flex-shrink:0">'+ic(I.close,20)+'</span></div>'+
+      '<div style="flex:1;padding:20px 24px 28px"><div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">'+
+      '<label style="display:block;grid-column:1 / span 2"><span class="drawer-field">Mặt hàng</span><input type="text" class="q-field drawer-inp" data-field="item" value="'+esc(qObj.item||'')+'" placeholder="VD: Khay nhựa 30x40"></label>'+
+      '<label style="display:block;grid-column:1 / span 2"><span class="drawer-field">Nhà cung cấp</span><select class="q-field drawer-inp" data-field="nccId" style="cursor:pointer;font-weight:700">'+nccOpts+'</select></label>'+
+      '<label style="display:block"><span class="drawer-field">Đơn giá (VNĐ)</span><input type="number" class="q-field drawer-inp" data-field="price" value="'+esc(qObj.price||'')+'" placeholder="0"></label>'+
+      '<label style="display:block"><span class="drawer-field">Đơn vị tính</span><input type="text" class="q-field drawer-inp" data-field="unit" value="'+esc(qObj.unit||'')+'" placeholder="VD: cái / thùng / kg"></label>'+
+      '<label style="display:block"><span class="drawer-field">Ngày báo giá</span><input type="date" class="q-field drawer-inp" data-field="date" value="'+esc(qObj.date||'')+'"></label>'+
+      '<label style="display:block"><span class="drawer-field">Hiệu lực đến</span><input type="date" class="q-field drawer-inp" data-field="validUntil" value="'+esc(qObj.validUntil||'')+'"></label>'+
+      '<label style="display:block;grid-column:1 / span 2"><span class="drawer-field">Ghi chú</span><textarea class="q-field" data-field="note" placeholder="Điều kiện giao, MOQ, thanh toán…" style="width:100%;min-height:70px;resize:vertical;margin-top:6px;border:1px solid #ececec;border-radius:10px;padding:10px 12px;font-size:13.5px;font-weight:500;line-height:1.5;outline:none;color:#27272a">'+esc(qObj.note||'')+'</textarea></label></div>'+
+      (isAdmin()?'<div style="margin-top:18px;padding-top:14px;border-top:1px solid #ececec"><button id="q-del" style="height:36px;padding:0 16px;background:#fdecec;color:#dc2626;border:none;border-radius:9px;font-size:13px;font-weight:700">'+ic(I.trash,14,'#dc2626')+' Xóa báo giá này</button></div>':'')+
+      '</div></div></div>';
+  }
+
+  // ===== Panel QUẢN LÝ THÀNH VIÊN (admin) =====
+  if(S.membersOpen&&isAdmin()){
+    var mIds=Object.keys(S.members||{});
+    var mRows=mIds.map(function(uid){var m=S.members[uid];var me=FB.user&&FB.user.uid===uid;
+      return '<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-top:1px solid #f2f2f2">'+
+        '<div style="width:36px;height:36px;border-radius:50%;background:'+(m.role==='admin'?'#fdf0df':'#e3f6ec')+';color:'+(m.role==='admin'?'#b45309':'#15803d')+';display:flex;align-items:center;justify-content:center;font-weight:800;flex-shrink:0">'+esc((m.name||m.email||'?')[0].toUpperCase())+'</div>'+
+        '<div style="flex:1;min-width:0"><div style="font-size:14px;font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.name||'(chưa đặt tên)')+(me?' <span style="font-size:11px;color:#a1a1aa">(bạn)</span>':'')+'</div><div style="font-size:12px;color:#a1a1aa;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(m.email||'')+'</div></div>'+
+        '<select class="mem-role" data-uid="'+uid+'" style="height:32px;border:1px solid #ececec;border-radius:8px;font-size:12.5px;font-weight:700;padding:0 8px;cursor:pointer;color:'+(m.role==='admin'?'#b45309':'#15803d')+'"><option value="admin"'+(m.role==='admin'?' selected':'')+'>Admin</option><option value="member"'+(m.role!=='admin'?' selected':'')+'>Nhân viên</option></select>'+
+        (me?'':'<button class="mem-del" data-uid="'+uid+'" style="width:32px;height:32px;border:none;background:#fdecec;border-radius:8px;cursor:pointer;flex-shrink:0;display:flex;align-items:center;justify-content:center">'+ic(I.trash,15,'#dc2626')+'</button>')+
+        '</div>';
+    }).join('');
+    html+='<div style="position:fixed;inset:0;z-index:80;display:flex;align-items:center;justify-content:center"><div id="mem-bg" style="position:absolute;inset:0;background:rgba(24,24,27,.4)"></div>'+
+      '<div style="position:relative;width:480px;max-width:94vw;max-height:88vh;overflow-y:auto;background:#fff;border-radius:16px;box-shadow:0 24px 60px rgba(0,0,0,.26);padding:24px">'+
+      '<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:14px"><div><div style="font-size:18px;font-weight:800">👥 Thành viên team</div><div style="font-size:12.5px;color:#71717a;font-weight:600;margin-top:4px;line-height:1.5">Mọi người đăng nhập đều dùng chung dữ liệu này. Admin có thể đổi vai trò hoặc gỡ thành viên.</div></div><span id="mem-close" style="cursor:pointer;color:#a1a1aa;flex-shrink:0">'+ic(I.close,20)+'</span></div>'+
+      '<div style="margin-top:10px">'+mRows+'</div>'+
+      '<div style="margin-top:16px;background:#f7f7f6;border:1px solid #ececec;border-radius:11px;padding:12px 14px;font-size:12.5px;color:#52525b;font-weight:600;line-height:1.6">💡 Để thêm người mới: bảo họ mở web, bấm “Đăng nhập để đồng bộ” và <b>tạo tài khoản</b> bằng email của họ. Họ sẽ tự xuất hiện ở đây với vai trò Nhân viên.</div>'+
+      '</div></div>';
+  }
   return html;
 }
 
@@ -680,15 +913,38 @@ function attachEvents(){
     var which=this.getAttribute('data-edit');
     var cur=which==='brand'?S.brand:S.user;
     var v=prompt(which==='brand'?'Tên thương hiệu:':'Tên của bạn:',cur);
-    if(v!=null&&v.trim()){if(which==='brand')S.brand=v.trim();else S.user=v.trim();save();render();}
+    if(v!=null&&v.trim()){
+      if(which==='brand')S.brand=v.trim();
+      else{S.user=v.trim();if(FB.user&&S.members&&S.members[FB.user.uid]){S.members[FB.user.uid].name=v.trim();}}
+      save();render();
+    }
   });
+  var mb=el('members-btn');if(mb)mb.addEventListener('click',function(){S.membersOpen=true;render();});
 
   if(S.view==='overview')attachOverview();
   if(S.view==='orders')attachOrders();
+  if(S.view==='ncc')attachNCC();
+  if(S.view==='quotes')attachQuotes();
   if(S.view==='tasks')attachTasks();
   if(S.view==='calendar')attachCalendar();
+  if(S.view==='reports')attachReports();
   attachOverlays();
 }
+
+function attachNCC(){
+  var s=el('ncc-search');if(s)s.addEventListener('input',function(){S.nccSearch=this.value;rerenderContent();restoreFocus('ncc-search',this.value.length);});
+  var nw=el('ncc-new');if(nw)nw.addEventListener('click',function(){var id=S.nid++;S.ncc.unshift({id:id,name:'',contact:'',phone:'',email:'',address:'',category:'',note:''});S.nccOpen=id;save();render();});
+  on('.ncc-open','click',function(){S.nccOpen=+this.getAttribute('data-id');render();});
+}
+
+function attachQuotes(){
+  on('.q-view','click',function(){S.qView=this.getAttribute('data-view');render();});
+  var s=el('q-search');if(s)s.addEventListener('input',function(){S.qSearch=this.value;rerenderContent();restoreFocus('q-search',this.value.length);});
+  var nw=el('q-new');if(nw)nw.addEventListener('click',function(){var id=S.nid++;S.quotes.unshift({id:id,item:'',nccId:'',price:'',unit:'',date:TODAY,validUntil:'',note:''});S.qOpen=id;save();render();});
+  on('.q-open','click',function(){S.qOpen=+this.getAttribute('data-id');render();});
+}
+
+function attachReports(){/* báo cáo chỉ hiển thị, không cần handler */}
 
 function attachOverview(){
   var notes=el('notes-area');
@@ -778,6 +1034,24 @@ function attachOverlays(){
   var dli=el('drawer-link-input');if(dli)dli.addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();addLink();}});
   on('.dr-file-open','click',function(){var idx=+this.getAttribute('data-idx');var ord=S.orders.filter(function(o){return o.id===S.oOpen;})[0];if(!ord||!ord.files||!ord.files[idx])return;downloadFile(ord.files[idx]);});
   on('.dr-file-del','click',function(){var idx=+this.getAttribute('data-idx');var ord=S.orders.filter(function(o){return o.id===S.oOpen;})[0];if(!ord||!ord.files)return;if(!confirm('Xóa file "'+(ord.files[idx]?ord.files[idx].name:'')+'"?'))return;var f=ord.files[idx];if(f.path&&FB.storage){FB.storage.ref(f.path).delete().catch(function(){});}ord.files.splice(idx,1);save();render();});
+  // ===== Drawer NCC =====
+  on('.ncc-field','input',function(){var f=this.getAttribute('data-field');var o=S.ncc.filter(function(n){return n.id===S.nccOpen;})[0];if(!o)return;o[f]=this.value;save();});
+  var ncbg=el('ncc-bg');if(ncbg)ncbg.addEventListener('click',function(){S.nccOpen=null;render();});
+  var ncc=el('ncc-close');if(ncc)ncc.addEventListener('click',function(){S.nccOpen=null;render();});
+  var ncdel=el('ncc-del');if(ncdel)ncdel.addEventListener('click',function(){if(!isAdmin())return;var id=S.nccOpen;if(!confirm('Xóa NCC này? Báo giá liên quan vẫn được giữ.'))return;S.ncc=S.ncc.filter(function(n){return n.id!==id;});S.nccOpen=null;save();render();});
+  // ===== Drawer Báo giá =====
+  on('.q-field','input',function(){var f=this.getAttribute('data-field');var o=S.quotes.filter(function(q){return q.id===S.qOpen;})[0];if(!o)return;o[f]=f==='nccId'?(this.value?+this.value:''):this.value;save();});
+  on('.q-field','change',function(){var f=this.getAttribute('data-field');var o=S.quotes.filter(function(q){return q.id===S.qOpen;})[0];if(!o)return;o[f]=f==='nccId'?(this.value?+this.value:''):this.value;save();});
+  var qbg=el('q-bg');if(qbg)qbg.addEventListener('click',function(){S.qOpen=null;render();});
+  var qcl=el('q-close');if(qcl)qcl.addEventListener('click',function(){S.qOpen=null;render();});
+  var qdel=el('q-del');if(qdel)qdel.addEventListener('click',function(){if(!isAdmin())return;var id=S.qOpen;if(!confirm('Xóa báo giá này?'))return;S.quotes=S.quotes.filter(function(q){return q.id!==id;});S.qOpen=null;save();render();});
+  // ===== Panel thành viên =====
+  var mbg=el('mem-bg');if(mbg)mbg.addEventListener('click',function(){S.membersOpen=false;render();});
+  var mcl=el('mem-close');if(mcl)mcl.addEventListener('click',function(){S.membersOpen=false;render();});
+  on('.mem-role','change',function(){if(!isAdmin())return;var uid=this.getAttribute('data-uid');if(S.members[uid]){
+    if(this.value!=='admin'&&S.members[uid].role==='admin'){var admins=Object.keys(S.members).filter(function(u){return S.members[u].role==='admin';});if(admins.length<=1){alert('Phải có ít nhất 1 admin.');render();return;}}
+    S.members[uid].role=this.value;computeRole();save();render();}});
+  on('.mem-del','click',function(){if(!isAdmin())return;var uid=this.getAttribute('data-uid');if(!S.members[uid])return;if(!confirm('Gỡ thành viên "'+(S.members[uid].name||S.members[uid].email)+'" khỏi team?'))return;delete S.members[uid];save();render();});
   // deadline prompt
   var dlbg=el('dl-bg');if(dlbg)dlbg.addEventListener('click',function(){S.dlPrompt=null;render();});
   var dls=el('dl-skip');if(dls)dls.addEventListener('click',function(){S.dlPrompt=null;render();});
